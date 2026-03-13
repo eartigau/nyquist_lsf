@@ -583,6 +583,11 @@ ax5.set_title(
     fontsize=11)
 ax5.legend(fontsize=9, loc='upper right')
 ax5.grid(True, which='both', alpha=0.3)
+# Clip y-axis to a decade around the real LSF data — the Gaussian curve is
+# so many orders of magnitude below that showing it would make the data invisible
+y_lo = 10 ** (np.floor(np.log10(frac_lsf_v.min())) - 0.5)
+y_hi = 10 ** (np.ceil( np.log10(frac_lsf_v.max())) + 0.5)
+ax5.set_ylim([100 * y_lo, 100 * y_hi])
 plt.tight_layout()
 _out = os.path.join(OUTPUT_DIR, 'fig_05_aliasing_vs_fwhm.png')
 plt.savefig(_out, dpi=150, bbox_inches='tight')
