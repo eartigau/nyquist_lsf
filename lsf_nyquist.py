@@ -562,7 +562,7 @@ frac_gauss_smooth = np.array(
 fig5, ax5 = plt.subplots(figsize=(9, 6))
 
 # Analytic Gaussian curve (smooth line)
-ax5.semilogy(fwhm_smooth, 100 * frac_gauss_smooth,
+ax5.semilogy(fwhm_smooth, frac_gauss_smooth,
              color=C_GAUSS, lw=2, ls='--',
              label='Gaussian LSF  (analytic$\\,$erfc formula)')
 
@@ -570,12 +570,12 @@ ax5.semilogy(fwhm_smooth, 100 * frac_gauss_smooth,
 orders_arr = np.array([r['order'] for r in records])
 for i, ord_val in enumerate(orders_uniq):
     mask = orders_arr == ord_val
-    ax5.semilogy(fwhm_vals[mask], 100 * frac_lsf_v[mask],
+    ax5.semilogy(fwhm_vals[mask], frac_lsf_v[mask],
                  'o', color=colors[i], ms=8, zorder=5,
                  label=f'Order {ord_val}  (real LSF)')
 
 ax5.set_xlabel('LSF FWHM  (real pixels)', fontsize=12)
-ax5.set_ylabel('Power above Nyquist  (%)', fontsize=12)
+ax5.set_ylabel('Fraction of power above Nyquist', fontsize=12)
 ax5.set_title(
     'Aliased power vs LSF width\n'
     'Circles = real (Zemax) LSF  |  dashed = same-FWHM Gaussian (analytic)\n'
@@ -583,11 +583,15 @@ ax5.set_title(
     fontsize=11)
 ax5.legend(fontsize=9, loc='upper right')
 ax5.grid(True, which='both', alpha=0.3)
-# Clip y-axis to a decade around the real LSF data — the Gaussian curve is
-# so many orders of magnitude below that showing it would make the data invisible
+# Clip y-axis to a decade around the real LSF data
 y_lo = 10 ** (np.floor(np.log10(frac_lsf_v.min())) - 0.5)
 y_hi = 10 ** (np.ceil( np.log10(frac_lsf_v.max())) + 0.5)
-ax5.set_ylim([100 * y_lo, 100 * y_hi])
+ax5.set_ylim([y_lo, y_hi])
+# Show clean decimal tick labels (e.g. 0.001, 0.01) instead of 1e-3, 1e-2
+from matplotlib.ticker import LogFormatter
+ax5.yaxis.set_major_formatter(
+    plt.FuncFormatter(lambda v, _: f'{v:g}')
+)
 plt.tight_layout()
 _out = os.path.join(OUTPUT_DIR, 'fig_05_aliasing_vs_fwhm.png')
 plt.savefig(_out, dpi=150, bbox_inches='tight')
