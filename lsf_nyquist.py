@@ -28,10 +28,11 @@ Nyquist sits at f = 0.5 cycles/real_pixel = 1/4 of the simulation bandwidth.
 
 Outputs
 -------
-  fig_01_psf_rotation.png  — raw PSF → rotated PSF → extracted 1-D LSF
-  fig_02_lsf_profiles.png  — LSF vs matched Gaussian in real space
-  fig_03_power_spectra.png — power spectrum + cumulative aliased-power curve
-  fig_04_summary.png       — aliased fraction for all 25 LSFs vs wavelength
+  fig_00_psf_model.png        — (model mode) raw PSF | model PSF | residual
+  fig_01_psf_rotation.png     — raw/model PSF → rotated PSF → extracted 1-D LSF
+  fig_02_lsf_profiles.png     — LSF vs matched Gaussian in real space
+  fig_03_power_spectra.png    — power spectrum + cumulative aliased-power curve
+  fig_04_summary.png          — aliased fraction for all 25 LSFs vs wavelength
   fig_05_aliasing_vs_fwhm.png — aliased power vs LSF FWHM (real pixels)
 
 Usage
@@ -42,7 +43,7 @@ All user-adjustable settings (data paths, pixel sizes, FFT length, …) are
 read from  config.yaml  in the same directory.  Edit that file — do not
 touch the Python code — to run on your own data.
 
-Dependencies: numpy, matplotlib, scipy, pyyaml
+Dependencies: numpy, matplotlib, scipy, pyyaml, astropy
 """
 
 import os
@@ -51,7 +52,8 @@ import yaml
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.ndimage import rotate as ndimage_rotate
-from scipy.optimize import minimize_scalar
+from scipy.optimize import minimize_scalar, minimize as _minimize_nd
+from astropy.io import fits
 
 # =============================================================================
 # Load configuration
@@ -86,6 +88,15 @@ N_FFT = int(_cfg['n_fft'])
 OUTPUT_DIR = _cfg['output_dir']
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# --- PSF model ---
+_pm = _cfg.get('psf_model', {})
+MODEL_ENABLED   = bool(_pm.get('enabled', False))
+MODEL_TYPE      = str(_pm.get('type', 'rectangle'))
+MODEL_CACHE_DIR = str(_pm.get('cache_dir', 'psf_models'))
+MODEL_REFIT     = bool(_pm.get('refit', False))
+if MODEL_ENABLED:
+    os.makedirs(MODEL_CACHE_DIR, exist_ok=True)
+
 # --- Derived constant (always 0.5 by Nyquist theorem) ---
 F_NYQUIST = 0.5   # cycles / real pixel
 
@@ -97,6 +108,11 @@ print(f'  sim_pixel_um      : {SIM_PIX_UM} µm')
 print(f'  oversample        : {OVERSAMPLE:.2f}×  ({OVERSAMPLE_INT}× integer)')
 print(f'  n_fft             : {N_FFT}')
 print(f'  output_dir        : {os.path.abspath(OUTPUT_DIR)}')
+if MODEL_ENABLED:
+    print(f'  psf_model         : ENABLED  type={MODEL_TYPE}  '
+          f'cache={MODEL_CACHE_DIR}  refit={MODEL_REFIT}')
+else:
+    print('  psf_model         : disabled  (raw Monte-Carlo PSF used)')
 print()
 
 # =============================================================================
@@ -274,13 +290,200 @@ def cumulative_above(lsf: np.ndarray, n_fft: int = 512):
 
 
 # =============================================================================
+# PSF model fitting  —  rectangle aperture  ⊛  2-D rotated Gaussian
+# =============================================================================
+
+def _build_rectangle_model(shape, cx, cy, a, b, shear, theta_rect_deg,
+                            sigma1, sigma2, theta_gauss_deg):
+    """
+    Build a unit-sum model PSF:
+      1. A sheared + rotated rectangle indicator function
+      2. Convolved with a 2-D rotated Gaussian (via FFT multiplication)
+
+    Rectangle geometry (in the rotated frame):
+      u  — dispersion-like axis  (half-width a, sim pixels)
+      v  — slit-like axis        (half-width b, sim pixels)
+      shear applies a tilt:  v_sheared = v - shear * u
+
+    Gaussian:
+      sigma1 / sigma2 — σ along the two eigen-axes (sim pixels)
+      theta_gauss_deg — rotation of those axes (degrees)
+    """
+    ny, nx = shape
+    y_idx, x_idx = np.mgrid[0:ny, 0:nx]
+    dx = x_idx.astype(float) - cx
+    dy = y_idx.astype(float) - cy
+
+    # Rotate sample coordinates into the rectangle frame
+    tr = np.deg2rad(theta_rect_deg)
+    cos_r, sin_r = np.cos(tr), np.sin(tr)
+    u =  dx * cos_r + dy * sin_r
+    v = -dx * sin_r + dy * cos_r
+
+    # Apply inverse shear to get the un-sheared rectangle indicator
+    v_s = v - shear * u
+    rect = ((np.abs(u) <= a) & (np.abs(v_s) <= b)).astype(np.float64)
+
+    if rect.sum() == 0:
+        return rect   # degenerate parameters — return zeros
+
+    # Build the Gaussian kernel in Fourier space and convolve
+    # FT of exp(-x²/2σ²) normalised to unit sum  →  exp(-2π²σ²f²)
+    freq_y = np.fft.fftfreq(ny)   # cycles / sim_pixel
+    freq_x = np.fft.fftfreq(nx)
+    FX, FY = np.meshgrid(freq_x, freq_y)
+
+    tg = np.deg2rad(theta_gauss_deg)
+    cos_g, sin_g = np.cos(tg), np.sin(tg)
+    fu =  FX * cos_g + FY * sin_g
+    fv = -FX * sin_g + FY * cos_g
+
+    gauss_ft = np.exp(-2.0 * np.pi**2 * (sigma1**2 * fu**2 + sigma2**2 * fv**2))
+
+    model = np.real(np.fft.ifft2(np.fft.fft2(rect) * gauss_ft))
+    model = np.maximum(model, 0.0)   # clip tiny negative numerical artefacts
+    s = model.sum()
+    return model / s if s > 0 else model
+
+
+def fit_rectangle_psf(psf: np.ndarray) -> np.ndarray:
+    """
+    Least-squares Nelder-Mead fit of the rectangle+Gaussian model to a
+    noisy Zemax PSF.
+
+    Free parameters (9):
+      cx, cy          — centroid (sim pixels)
+      a, b            — rectangle half-widths (sim pixels)
+      shear           — slit tilt:  v_rect = v - shear * u
+      theta_rect_deg  — rotation angle of the rectangle frame (degrees)
+      sigma1, sigma2  — Gaussian σ along two axes (sim pixels)
+      theta_gauss_deg — rotation of the Gaussian axes (degrees)
+
+    Returns the model PSF scaled to the same total flux as the input.
+    """
+    ny, nx = psf.shape
+    total_flux = psf.sum()
+    if total_flux == 0:
+        return psf.copy()
+    psf_norm = psf / total_flux
+
+    # --- Initial guesses from image moments ---
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    cx0 = float((xx * psf_norm).sum())
+    cy0 = float((yy * psf_norm).sum())
+    dx0 = xx - cx0
+    dy0 = yy - cy0
+    mxx = float((dx0**2 * psf_norm).sum())
+    myy = float((dy0**2 * psf_norm).sum())
+    mxy = float((dx0 * dy0 * psf_norm).sum())
+
+    # Eigenvalues of the moment matrix → semi-axes
+    # For a uniform rect on [-a, a]: variance = a²/3  →  a = √(3 * eigenvalue)
+    tr_ = mxx + myy
+    det_ = mxx * myy - mxy**2
+    disc = max((tr_ / 2)**2 - det_, 0.0)
+    lam1 = tr_ / 2 + np.sqrt(disc)
+    lam2 = tr_ / 2 - np.sqrt(disc)
+    a0 = np.sqrt(3.0 * max(lam1, 0.5))
+    b0 = np.sqrt(3.0 * max(lam2, 0.5))
+    theta0 = float(0.5 * np.degrees(np.arctan2(2.0 * mxy, mxx - myy)))
+
+    p0 = [cx0, cy0, a0, b0, 0.0, theta0, 1.0, 1.0, 0.0]
+
+    def objective(p):
+        cx, cy, a, b, shear, th_r, s1, s2, th_g = p
+        a, b, s1, s2 = abs(a), abs(b), abs(s1), abs(s2)
+        if a < 0.2 or b < 0.2 or s1 < 0.05 or s2 < 0.05:
+            return 1e10
+        try:
+            m = _build_rectangle_model((ny, nx), cx, cy, a, b, shear,
+                                        th_r, s1, s2, th_g)
+        except Exception:
+            return 1e10
+        if m.sum() == 0:
+            return 1e10
+        return float(np.sum((psf_norm - m) ** 2))
+
+    res = _minimize_nd(objective, p0, method='Nelder-Mead',
+                       options={'xatol': 1e-3, 'fatol': 1e-10,
+                                'maxiter': 50000, 'adaptive': True})
+
+    cx, cy, a, b, shear, th_r, s1, s2, th_g = res.x
+    model = _build_rectangle_model(
+        (ny, nx), cx, cy, abs(a), abs(b), shear,
+        th_r, abs(s1), abs(s2), th_g)
+    return model * total_flux
+
+
+def get_model_psf(psf: np.ndarray, psf_filename: str) -> np.ndarray:
+    """
+    Return the smooth rectangle+Gaussian model PSF.
+
+    Uses a FITS cache to avoid refitting when the script is re-run.
+    Cache path: <MODEL_CACHE_DIR>/<stem>_model.fits
+    Set  refit: true  in config.yaml to force a fresh fit.
+    """
+    stem       = os.path.splitext(os.path.basename(psf_filename))[0]
+    cache_path = os.path.join(MODEL_CACHE_DIR, f'{stem}_model.fits')
+
+    if not MODEL_REFIT and os.path.isfile(cache_path):
+        print(f'    loaded model from cache : {cache_path}')
+        with fits.open(cache_path) as hdul:
+            return hdul[0].data.astype(np.float64)
+
+    print(f'    fitting rectangle+Gaussian model to '
+          f'{os.path.basename(psf_filename)} …', flush=True)
+    model = fit_rectangle_psf(psf)
+
+    hdu = fits.PrimaryHDU(model.astype(np.float32))
+    hdu.header['ORIGIN']  = 'lsf_nyquist.py'
+    hdu.header['SRCFILE'] = os.path.basename(psf_filename)
+    hdu.header['MODEL']   = 'rectangle+gaussian'
+    hdu.writeto(cache_path, overwrite=True)
+    print(f'    model saved to {cache_path}')
+    return model
+
+
+# =============================================================================
 # ── SINGLE-PSF DEMO ──────────────────────────────────────────────────────────
 # =============================================================================
 print(f'Loading example PSF: {EXAMPLE_FILE}')
 psf_raw = read_zemax_map(EXAMPLE_FILE)
 
+if MODEL_ENABLED:
+    psf_demo = get_model_psf(psf_raw, EXAMPLE_FILE)
+
+    # --- Figure 0: raw PSF vs model PSF ----------------------------------------
+    _vmax     = psf_raw.max()
+    _res      = (psf_raw - psf_demo) / (_vmax or 1.0)
+    _res_lim  = max(abs(_res.max()), abs(_res.min()))
+    fig0, axes0 = plt.subplots(1, 3, figsize=(14, 4.5))
+    for ax, img, title, cmap, vmin, vmax in zip(
+            axes0,
+            [psf_raw,   psf_demo,           _res],
+            ['(a) Raw Monte-Carlo PSF',
+             f'(b) Model PSF  ({MODEL_TYPE})',
+             '(c) Residual  (raw − model)\nnorm. by raw peak'],
+            ['inferno',  'inferno',          'RdBu_r'],
+            [0,          0,                 -_res_lim],
+            [_vmax,      _vmax,              _res_lim]):
+        im = ax.imshow(img, origin='lower', cmap=cmap,
+                       vmin=vmin, vmax=vmax, aspect='equal')
+        ax.set_title(title, fontsize=11)
+        ax.set_xlabel('x (sim px)')
+        ax.set_ylabel('y (sim px)')
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig0.suptitle(f'Step 0 — PSF model fit\n({EXAMPLE_FILE})', fontsize=12)
+    fig0.tight_layout()
+    _out0 = os.path.join(OUTPUT_DIR, 'fig_00_psf_model.png')
+    fig0.savefig(_out0, dpi=150, bbox_inches='tight')
+    plt.close(fig0)
+    print(f'Saved  {_out0}')
+else:
+    psf_demo = psf_raw
+
 print('Finding optimal rotation angle ...')
-lsf_ex, angle_ex, psf_rot_ex = extract_lsf(psf_raw)
+lsf_ex, angle_ex, psf_rot_ex = extract_lsf(psf_demo)
 cen_ex    = int(np.argmax(lsf_ex))
 fwhm_sim  = measure_fwhm(lsf_ex)
 fwhm_real = fwhm_sim / OVERSAMPLE_INT
@@ -324,8 +527,9 @@ fig1, axes = plt.subplots(1, 3, figsize=(15, 5),
                            gridspec_kw={'width_ratios': [1, 1, 1.3]})
 
 for ax, img, title in zip(axes[:2],
-                           [psf_raw, psf_rot_ex],
-                           ['(a) Raw PSF (native orientation)',
+                           [psf_demo, psf_rot_ex],
+                           ['(a) Model PSF (native orientation)'
+                            if MODEL_ENABLED else '(a) Raw PSF (native orientation)',
                             f'(b) Rotated PSF  ({angle_ex:.1f}°)']):
     im = ax.imshow(img, origin='lower', cmap='inferno', aspect='equal')
     ax.set_title(title, fontsize=11)
@@ -481,6 +685,8 @@ for order in orders_list:
             print(f'  WARNING: {fname} not found — skipping.')
             continue
         psf = read_zemax_map(fname)
+        if MODEL_ENABLED:
+            psf = get_model_psf(psf, fname)
         lsf, ang, _ = extract_lsf(psf)
         cen = int(np.argmax(lsf))
         fwhm_s = measure_fwhm(lsf)

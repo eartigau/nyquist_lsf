@@ -275,6 +275,30 @@ n_fft: 512
 # Folder where the four PNG figures are written.
 # Use  .  for the current directory, or give an absolute/relative path.
 output_dir: .
+
+
+# ── PSF model ──────────────────────────────────────────────────────────────────
+
+# Zemax PSFs come from a Monte-Carlo ray-trace simulation and are noisy.
+# That noise adds spurious high-frequency content and inflates the
+# estimated aliased-power fraction.
+#
+# When  enabled: true , the script first fits a smooth parametric model
+# to each PSF, then uses the model PSF for all downstream steps.
+#
+# Model geometry:  rectangle (half-widths a, b; shear; rotation)
+#                  convolved with a 2-D rotated Gaussian (σ1, σ2; rotation)
+# 9 free parameters, optimised with Nelder-Mead.
+#
+# Fitted models are cached as FITS files so re-running the script is fast.
+# Set  refit: true  to force a fresh fit of every PSF (e.g. after the
+# FITS cache folder is deleted or the model definition changes).
+
+psf_model:
+  enabled: true          # true = fit smooth model; false = use raw PSF
+  type: rectangle        # only "rectangle" is currently implemented
+  cache_dir: psf_models  # folder for FITS cache files (auto-created)
+  refit: false           # true = ignore cache, refit every PSF
 ```
 
 ### How to find `sim_pixel_um` from a Zemax file
@@ -307,15 +331,39 @@ sim_pixel_um = (Image Width in mm) / (Number of pixels) × 1000
 
 ## 7. Understanding the output figures
 
+### Figure 0 — `fig_00_psf_model.png`  *(model mode only)*
+
+This diagnostic figure is produced only when `psf_model.enabled: true`.
+It shows three panels side by side for the example PSF:
+
+- **Panel (a) — Raw Monte-Carlo PSF:** the noisy Zemax simulation output.
+  Speckle-like noise at the few-percent level is typical.
+
+- **Panel (b) — Model PSF:** the smooth rectangle+Gaussian fit.  Structure
+  that is genuinely part of the optical PSF (asymmetries, secondary lobes)
+  is reproduced; random Monte-Carlo noise is removed.
+
+- **Panel (c) — Residual (raw − model) / peak:** the difference normalised
+  by the raw peak.  Randomly distributed residuals (no coherent structure)
+  confirm the model is capturing the real optical shape.
+
+> **Why this matters for the aliasing estimate:**  High-frequency noise in
+> the raw PSF mimics real optical power at those frequencies.  Fitting a
+> smooth model first isolates the true optical high-frequency content and
+> gives a physically meaningful aliasing fraction.
+
+---
+
 ### Figure 1 — `fig_01_psf_rotation.png`
 
 ![PSF rotation and LSF extraction](fig_01_psf_rotation.png)
 
 This figure shows the three steps needed to go from a 2-D PSF to a 1-D LSF.
 
-- **Panel (a) — Raw PSF:** The PSF as Zemax simulates it.  The slit image
-  is elongated diagonally because the rectangular fiber aperture is tilted
-  on the detector by spectrograph anamorphism.
+- **Panel (a) — PSF (native orientation):** In model mode this shows the
+  smooth model PSF; in raw mode it shows the Monte-Carlo PSF directly.
+  The slit image is elongated diagonally because the rectangular fiber
+  aperture is tilted on the detector by spectrograph anamorphism.
 
 - **Panel (b) — Rotated PSF:** The same PSF after rotating by the optimal
   angle (−8° in this example).  Now the long axis of the slit image is

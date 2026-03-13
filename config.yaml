@@ -78,3 +78,27 @@ n_fft: 512
 # Use  .  for the current working directory (same folder as the script).
 # The directory will be created if it does not already exist.
 output_dir: .
+
+
+# -----------------------------------------------------------------------------
+# PSF MODEL  — fit a smooth parametric model to the noisy Monte-Carlo PSF
+# -----------------------------------------------------------------------------
+#
+# WHY: Zemax PSF maps are produced by a Monte-Carlo simulation.  The
+#      noise in the map adds spurious high-frequency content that inflates
+#      the estimated aliased-power fraction.  Fitting a smooth model first
+#      removes that bias before the FFT analysis.
+#
+# WHAT: The model is a sheared + rotated rectangle convolved with a
+#       2-D rotated Gaussian.  Nine free parameters are fitted with
+#       Nelder-Mead.  The model PSF is then used for ALL downstream
+#       analysis instead of the raw Monte-Carlo map.
+#
+# CACHE: fitted models are saved as FITS files so re-running the script
+#        is fast.  Set  refit: true  to force a fresh fit of every PSF.
+
+psf_model:
+  enabled: true          # true = use smooth model; false = use raw PSF
+  type: rectangle        # only "rectangle" is implemented
+  cache_dir: psf_models  # folder for FITS cache files (created automatically)
+  refit: false           # true = ignore cache and refit every PSF
