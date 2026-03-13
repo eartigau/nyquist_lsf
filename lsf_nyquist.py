@@ -525,7 +525,7 @@ ax4a.set_title('Aliased power fraction across all 25 PSFs\n'
                'A perfect sinc would give exactly 0 % (off the bottom of the log scale)',
                fontsize=11)
 ax4a.legend(title='Circles = LSF / Squares = Gaussian',
-            fontsize=9, loc='upper right')
+            fontsize=9, loc='lower left')
 ax4a.grid(True, which='both', alpha=0.3)
 
 ax4b.set_xlabel('Wavelength  (µm)', fontsize=12)
