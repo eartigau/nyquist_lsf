@@ -22,6 +22,11 @@
 5. [Running the code](#5-running-the-code)
 6. [Configuration — `config.yaml`](#6-configuration--configyaml)
 7. [Understanding the output figures](#7-understanding-the-output-figures)
+   - [Figure 1 — PSF rotation](#figure-1--fig_01_psf_rotationpng)
+   - [Figure 2 — LSF vs Gaussian profiles](#figure-2--fig_02_lsf_profilespng)
+   - [Figure 3 — Power spectra](#figure-3--fig_03_power_spectrapng)
+   - [Figure 4 — Summary over all LSFs](#figure-4--fig_04_summarypng)
+   - [Figure 5 — Aliased power vs FWHM](#figure-5--fig_05_aliasing_vs_fwhmpng)
 8. [Using your own data](#8-using-your-own-data)
 9. [Key results at a glance](#9-key-results-at-a-glance)
 10. [FAQ / Troubleshooting](#10-faq--troubleshooting)
@@ -437,6 +442,41 @@ Number of pixels  : 100 x 100
 ```
 
 Then: `sim_pixel_um = 0.30 / 100 × 1000 = 3.0 µm`.
+
+---
+
+### Figure 5 — `fig_05_aliasing_vs_fwhm.png`
+
+![Aliased power vs FWHM](fig_05_aliasing_vs_fwhm.png)
+
+This figure ties everything together into a single actionable curve.
+
+- **Horizontal axis:** LSF FWHM in real detector pixels.
+  Narrower LSFs = higher spatial frequencies = more aliased power.
+- **Vertical axis:** Fraction of total power above the Nyquist frequency (%),
+  on a log scale.
+- **Dashed red curve:** The exact analytic prediction for a Gaussian LSF,
+  $f_{\rm aliased} = \mathrm{erfc}(2\pi\sigma f_N)$, plotted as a smooth
+  function of FWHM.  This is the theoretical *floor* — the minimum possible
+  aliasing for any LSF of a given width.
+- **Coloured circles:** The 25 real Zemax LSFs, one per field point, coloured
+  by diffraction order.
+
+#### What to look for
+
+1. **The trend is monotonic:** narrower LSFs always have more aliased power,
+   for both the Gaussian and the real LSF.  To reduce aliasing you need a
+   broader LSF (at the cost of spectral resolution).
+
+2. **The gap between circles and curve:** at every FWHM, the real LSF sits
+   several orders of magnitude above the Gaussian prediction.  This gap is the
+   direct consequence of the rectangular aperture's sinc-like Fourier
+   tail.  A circular fiber would close most of this gap.
+
+3. **Scatter at fixed FWHM:** points at the same FWHM but different aliased
+   fractions come from different parts of the focal plane (different orders or
+   field positions).  The PSF shape — and therefore the aliased fraction —
+   depends on the local aberrations, not just the width.
 
 ---
 

@@ -32,6 +32,7 @@ Outputs
   fig_02_lsf_profiles.png  — LSF vs matched Gaussian in real space
   fig_03_power_spectra.png — power spectrum + cumulative aliased-power curve
   fig_04_summary.png       — aliased fraction for all 25 LSFs vs wavelength
+  fig_05_aliasing_vs_fwhm.png — aliased power vs LSF FWHM (real pixels)
 
 Usage
 -----
@@ -540,7 +541,56 @@ plt.savefig(_out, dpi=150, bbox_inches='tight')
 plt.close()
 print(f'Saved  {_out}')
 
+# =============================================================================
+# Figure 5 — Aliased power vs LSF FWHM
+# =============================================================================
+# For all 25 real LSFs, plot the measured aliased fraction against FWHM.
+# Overlay the exact analytic Gaussian curve: frac = erfc(2*pi*sigma*f_N)
+# where sigma = FWHM / (2*sqrt(2*ln2)).
+# This shows the clear monotonic trend and how far the real LSF deviates
+# from the Gaussian prediction at any given FWHM.
+
+fwhm_vals  = np.array([r['fwhm']       for r in records])   # real pixels
+frac_lsf_v = np.array([r['frac_lsf']  for r in records])   # FFT-measured
+frac_g_v   = np.array([r['frac_gauss'] for r in records])  # analytic erfc
+
+# Smooth Gaussian reference curve over the FWHM range in the data
+fwhm_smooth = np.linspace(0.5 * fwhm_vals.min(), 1.5 * fwhm_vals.max(), 500)
+frac_gauss_smooth = np.array(
+    [gaussian_aliased_fraction_analytic(fw) for fw in fwhm_smooth])
+
+fig5, ax5 = plt.subplots(figsize=(9, 6))
+
+# Analytic Gaussian curve (smooth line)
+ax5.semilogy(fwhm_smooth, 100 * frac_gauss_smooth,
+             color=C_GAUSS, lw=2, ls='--',
+             label='Gaussian LSF  (analytic$\\,$erfc formula)')
+
+# Real LSF measurements (one point per PSF, colour = order)
+orders_arr = np.array([r['order'] for r in records])
+for i, ord_val in enumerate(orders_uniq):
+    mask = orders_arr == ord_val
+    ax5.semilogy(fwhm_vals[mask], 100 * frac_lsf_v[mask],
+                 'o', color=colors[i], ms=8, zorder=5,
+                 label=f'Order {ord_val}  (real LSF)')
+
+ax5.set_xlabel('LSF FWHM  (real pixels)', fontsize=12)
+ax5.set_ylabel('Power above Nyquist  (%)', fontsize=12)
+ax5.set_title(
+    'Aliased power vs LSF width\n'
+    'Circles = real (Zemax) LSF  |  dashed = same-FWHM Gaussian (analytic)\n'
+    'The real LSF sits millions of times above the Gaussian at every FWHM',
+    fontsize=11)
+ax5.legend(fontsize=9, loc='upper right')
+ax5.grid(True, which='both', alpha=0.3)
+plt.tight_layout()
+_out = os.path.join(OUTPUT_DIR, 'fig_05_aliasing_vs_fwhm.png')
+plt.savefig(_out, dpi=150, bbox_inches='tight')
+plt.close()
+print(f'Saved  {_out}')
+
 print(f'\nAll done.  Output figures written to  {os.path.abspath(OUTPUT_DIR)}/')
 for f in ['fig_01_psf_rotation.png', 'fig_02_lsf_profiles.png',
-          'fig_03_power_spectra.png', 'fig_04_summary.png']:
+          'fig_03_power_spectra.png', 'fig_04_summary.png',
+          'fig_05_aliasing_vs_fwhm.png']:
     print(f'  {os.path.join(OUTPUT_DIR, f)}')
