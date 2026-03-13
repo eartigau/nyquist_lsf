@@ -22,6 +22,7 @@
 5. [Running the code](#5-running-the-code)
 6. [Configuration — `config.yaml`](#6-configuration--configyaml)
 7. [Understanding the output figures](#7-understanding-the-output-figures)
+   - [Figure 0 — PSF model diagnostic](#figure-0--fig_00_psf_modelpng--model-mode-only) *(when `psf_model.enabled: true`)*
    - [Figure 1 — PSF rotation](#figure-1--fig_01_psf_rotationpng)
    - [Figure 2 — LSF vs Gaussian profiles](#figure-2--fig_02_lsf_profilespng)
    - [Figure 3 — Power spectra](#figure-3--fig_03_power_spectrapng)
@@ -120,11 +121,41 @@ When the code converts frequencies, it multiplies by the oversampling factor
 to express everything in units of **cycles per real pixel**.  The Nyquist
 limit is always 0.5 cycles per real pixel regardless of oversampling.
 
+### 2.5 The Monte-Carlo noise problem — why a smooth PSF model is needed
+
+Zemax builds its PSF maps by tracing millions of rays through the optical
+system and histogramming where they land.  Despite the large sample, each
+pixel has Poisson-like scatter at the few-percent level — random, not optical.
+
+When you take the FFT of a noisy image, that **white noise spreads power
+uniformly across all spatial frequencies**, including the aliased zone above
+$f_N$.  Without any correction, the measured aliased fraction is:
+
+$$f_{\rm aliased}^{\rm measured} = f_{\rm aliased}^{\rm optical} + f_{\rm aliased}^{\rm noise}$$
+
+For the VROOMM data the noise contribution can easily be the same order of
+magnitude as the true optical signal, inflating the aliasing estimate by a
+factor of several.
+
+**The fix:** fit a smooth **parametric model** to each raw Zemax PSF and use
+the noise-free model for all downstream FFT analysis.  The model captures
+real optical structure (asymmetry, rotation, secondary lobes) but discards
+the random pixel noise.  This is controlled by the `psf_model` block in
+`config.yaml` (section 6).
+
 ---
 
 ## 3. Prerequisites
 
-You need **Python 3.9 or later** and four standard scientific packages.
+You need **Python 3.9 or later** and five standard scientific packages.
+
+| Package | What it does here |
+|---------|-------------------|
+| `numpy` | Array maths, FFT |
+| `matplotlib` | All figures |
+| `scipy` | PSF rotation, 1-D optimiser, Nelder-Mead fitter, `erfc` |
+| `pyyaml` | Read `config.yaml` |
+| `astropy` | Read/write FITS cache files for the PSF model |
 
 ### Option A — conda (recommended if you are new to Python)
 
@@ -133,20 +164,20 @@ You need **Python 3.9 or later** and four standard scientific packages.
 everything you need:
 
 ```bash
-conda create -n nyquist python=3.11 numpy matplotlib scipy pyyaml
+conda create -n nyquist python=3.11 numpy matplotlib scipy pyyaml astropy
 conda activate nyquist
 ```
 
 ### Option B — pip (if you already have Python installed)
 
 ```bash
-pip install numpy matplotlib scipy pyyaml
+pip install numpy matplotlib scipy pyyaml astropy
 ```
 
 To check everything is installed correctly:
 
 ```bash
-python -c "import numpy, matplotlib, scipy, yaml; print('All good!')"
+python -c "import numpy, matplotlib, scipy, yaml, astropy; print('All good!')"
 ```
 
 ---
@@ -189,11 +220,17 @@ From inside the repository folder:
 python lsf_nyquist.py
 ```
 
-The script will print its progress to the terminal and save four PNG figures.
-A typical run takes about 30–60 seconds (most of the time is spent finding the
-optimal rotation angle for each of the 25 PSFs).
+The script prints its progress to the terminal and saves up to six PNG figures.
 
-Expected output:
+**First run** (PSF model enabled): fitting the 25 PSFs with Nelder-Mead takes
+roughly **2–5 minutes** total.  Each fitted model is cached as a FITS file in
+`psf_models/`, so every subsequent run reads the cache and finishes in a few
+seconds.
+
+**With `psf_model.enabled: false`** (raw PSF mode): the only significant cost
+is the rotation-angle search — about **30–60 seconds** for all 25 files.
+
+Expected terminal output (model mode, first run):
 
 ```
 Configuration loaded from config.yaml:
@@ -203,18 +240,37 @@ Configuration loaded from config.yaml:
   sim_pixel_um      : 3.0 µm
   oversample        : 4.00×  (4× integer)
   n_fft             : 512
-  output_dir        : /path/to/nyquist_lsf
+  output_dir        : /Users/.../nyquist_lsf
+  psf_model         : ENABLED  type=rectangle  cache=psf_models  refit=False
 
 Loading example PSF: VROOMM_v04_rectangular_fiber/R1553.txt
+    fitting rectangle+Gaussian model to R1553.txt …
+    model saved to psf_models/R1553_model.fits
+Saved  ./fig_00_psf_model.png
 Finding optimal rotation angle ...
-  Optimal rotation : -7.97 °
-  LSF FWHM         : 12.71 sim px  =  3.18 real px
-  Aliased power — real LSF       : 0.6308 %
-  Aliased power — Gaussian (analytic, erfc): 2.037e-07 %
+  Optimal rotation : -8.16 °
+  LSF FWHM         : 12.69 sim px  =  3.17 real px
+  Aliased power — real LSF       : 0.5436 %
+  Aliased power — Gaussian (analytic, erfc): 2.172e-07 %
   Aliased power — sinc           : 0.0000 %  (band-limited by definition)
-Saved  fig_01_psf_rotation.png
+Saved  ./fig_01_psf_rotation.png
 ...
+
+Batch processing all LSFs in VROOMM_v04_rectangular_fiber/ ...
+    fitting rectangle+Gaussian model to R671.txt …
+    model saved to psf_models/R671_model.fits
+  R671  λ=0.9235 µm  FWHM=5.64 real-px  aliased: LSF=0.0000%  Gauss=1.923e-24%
+    ...
+    loaded model from cache : psf_models/R1553_model.fits  ← already fitted above
+    ...
+Saved  ./fig_04_summary.png
+Saved  ./fig_05_aliasing_vs_fwhm.png
+
+All done.
 ```
+
+On re-runs, the "fitting…" lines are replaced by "loaded model from cache: …" and
+the script finishes in seconds.
 
 ---
 
@@ -329,9 +385,94 @@ sim_pixel_um = (Image Width in mm) / (Number of pixels) × 1000
 
 ---
 
+### How the PSF model works (rectangle + Gaussian)
+
+This section gives the technical details of the model used when
+`psf_model.enabled: true`.  You can skip it if you are only running the code;
+read it if you want to understand what the fit is doing or diagnose a bad fit.
+
+#### The physical picture
+
+A rectangular fiber projects a slit image onto the focal plane.  To a good
+approximation the PSF is a **sharp-edged rectangle** (from the fiber aperture)
+blurred by the **telescope + spectrograph optics** (modelled as a 2-D
+Gaussian).  The rectangle may be rotated on the detector due to anamorphism
+and sheared along the dispersion direction if the slit is not perfectly
+straight on the detector.
+
+#### Model definition
+
+The model PSF is:
+
+```
+M(x,y) = Rect(u, v;  a, b, shear, θ_rect)  ⊛  Gaussian(σ₁, σ₂, θ_gauss)
+```
+
+where `⊛` is 2-D convolution, computed via FFT multiplication for speed, and
+the **9 free parameters** are:
+
+| Parameter | Symbol | Meaning |
+|-----------|--------|---------|
+| Centroid column | c_x | PSF centre in x (sim px) |
+| Centroid row | c_y | PSF centre in y (sim px) |
+| Rectangle half-width (dispersion) | a | half-extent along u-axis (sim px) |
+| Rectangle half-width (slit) | b | half-extent along v-axis (sim px) |
+| Shear | s | slit tilt: v̂ = v − s·u |
+| Rectangle rotation | θ_rect | angle of rectangle frame from pixel x-axis (°) |
+| Gaussian σ, axis 1 | σ₁ | optics-blur scale along first eigen-axis (sim px) |
+| Gaussian σ, axis 2 | σ₂ | optics-blur scale along second eigen-axis (sim px) |
+| Gaussian rotation | θ_gauss | orientation of the Gaussian blur axes (°) |
+
+The rectangle indicator is evaluated in the rotated+sheared frame `(u, v)`.  A
+point `(x, y)` is inside the rectangle if `|u| ≤ a` **and** `|v − s·u| ≤ b`.
+
+#### Optimisation
+
+Initial parameter guesses are computed from the image's **first and second
+moments** (centroid, moment eigenvalues → approximate half-widths and
+orientation).  The 9 parameters are then refined by **Nelder-Mead simplex**
+(`scipy.optimize.minimize`, gradient-free), minimising the sum of squared
+pixel residuals between the normalised raw PSF and the normalised model.
+
+Nelder-Mead is chosen because it is robust in high-dimensional spaces without
+calculating gradients, and the parameter space here has narrow valleys (the
+shear and two rotation angles are nearly degenerate at low shear).
+
+Typical fit time: **5–15 s per PSF** on a modern laptop CPU.
+
+#### FITS cache
+
+Each fitted model is written to `<cache_dir>/<stem>_model.fits` as a 32-bit
+float FITS image with header keywords recording the source filename and model
+type.  On re-run, the cache file is loaded in milliseconds without refitting.
+
+To **force a refit** (e.g. after changing the optical design or if a cached
+fit looks wrong in `fig_00`), set `refit: true` in `config.yaml`, run the
+script once, then set it back to `false`.
+
+#### Diagnosing a bad fit
+
+Open `fig_00_psf_model.png`.  The residual panel (c) should look like uniform
+random noise with no coherent structure.  If you see:
+
+- **Butterfly / dipole pattern in residuals** — the model is in the right
+  place but the rectangle rotation or shear is slightly off.  Try setting
+  `refit: true` and running again (the optimizer may have converged to a local
+  minimum).
+- **Ring pattern** — the Gaussian σ values are too small; the model is
+  sharper than the data.  Usually self-correcting on refit.
+- **Asymmetric blob** — the actual PSF has a significant asymmetry or
+  coma-like tail that the symmetric-Gaussian blur cannot capture.  The fit
+  will still remove most of the noise, but the systematic residuals may
+  contribute a small bias to the aliased-fraction estimate.
+
+---
+
 ## 7. Understanding the output figures
 
 ### Figure 0 — `fig_00_psf_model.png`  *(model mode only)*
+
+![PSF model: raw vs model vs residual](fig_00_psf_model.png)
 
 This diagnostic figure is produced only when `psf_model.enabled: true`.
 It shows three panels side by side for the example PSF:
@@ -611,207 +752,83 @@ and run as normal.  The rotation angle found will be near 0°.
 
 ---
 
+**Q: `ModuleNotFoundError: No module named 'astropy'`**
+
+The PSF model fitting uses `astropy` for FITS I/O.  Install it:
+
+```bash
+pip install astropy
+# or with conda:
+conda install astropy
+```
+
+If you do not want to install `astropy`, set `psf_model.enabled: false` in
+`config.yaml` — the rest of the pipeline does not require it.
+
+---
+
+**Q: How do I force the script to refit all PSFs?**
+
+Set `refit: true` in the `psf_model` block of `config.yaml`, run the script,
+then set it back to `false`.  Alternatively, delete the `psf_models/` folder.
+
+---
+
+**Q: The PSF model in `fig_00` looks wrong / the fit is poor**
+
+See the "Diagnosing a bad fit" sub-section in section 6 for guidance.  The
+most reliable fix is to delete the offending `psf_models/<stem>_model.fits`
+file and run with `refit: true` once — Nelder-Mead occasionally converges to
+a local minimum on the first try, and a fresh start usually succeeds.
+
+---
+
+**Q: The first run takes many minutes — is that normal?**
+
+Yes.  On the first run the script fits a 9-parameter Nelder-Mead model to
+each of the 25 PSFs, which takes 5–15 s per PSF (roughly 2–5 min total).
+Every subsequent run loads the cached FITS files and finishes in seconds.
+Check that the `psf_models/` folder is being created and populated.
+
+---
+
+**Q: My aliased fraction changes drastically between model mode and raw mode**
+
+This is expected and is precisely the motivation for the model.  The raw
+Monte-Carlo PSF carries white noise that contributes power at all frequencies,
+including the aliased zone.  The smooth model removes that spurious
+contribution.  The model-mode result is the physically correct estimate.
+
+---
+
+**Q: Can I add a new model type (e.g. circular aperture)?**
+
+Yes.  Add a new `_build_<type>_model()` function in `lsf_nyquist.py` following
+the same interface as `_build_rectangle_model()`, then update `fit_rectangle_psf()`
+(or create a parallel `fit_<type>_psf()`) and route to it via the `MODEL_TYPE`
+configuration key.  Set `type: <your_type>` in `config.yaml`.
+
+---
+
 ## Dependencies
 
-| Package | Purpose |
-|---------|---------|
-| `numpy` | Array operations, FFT |
-| `matplotlib` | Figures |
-| `scipy` | PSF rotation (`ndimage.rotate`), 1-D optimiser (`optimize.minimize_scalar`), `erfc` for analytic Gaussian reference |
-| `pyyaml` | Reading `config.yaml` |
+| Package | Version | Purpose |
+|---------|---------|--------|
+| `numpy` | ≥ 1.20 | Array operations, FFT (`np.fft.rfft`) |
+| `matplotlib` | ≥ 3.3 | All output figures |
+| `scipy` | ≥ 1.6 | `ndimage.rotate` (PSF rotation), `optimize.minimize_scalar` (rotation search), `optimize.minimize` with Nelder-Mead (PSF fit), `special.erfc` (analytic Gaussian aliasing) |
+| `pyyaml` | ≥ 5.4 | Parsing `config.yaml` |
+| `astropy` | ≥ 5.0 | Reading/writing FITS cache files for PSF models |
 
----
+Install all in one command:
 
-## Overview
+```bash
+pip install numpy matplotlib scipy pyyaml astropy
+```
 
-This repository analyses the **Line Spread Function (LSF)** of a spectrograph
-using Zemax-simulated Point Spread Functions (PSFs), and answers a concrete
-question:
+or with conda:
 
-> **What fraction of the LSF's power sits at spatial frequencies that the
-> detector cannot faithfully sample?**
+```bash
+conda install numpy matplotlib scipy pyyaml astropy
+```
 
-We compare three idealised LSF shapes:
-
-| Profile | Aliased power | Why |
-|---------|--------------|-----|
-| **Sinc** | **0 %** exactly | Band-limited by construction — all power within Nyquist |
-| **Gaussian** | ~10⁻²² – 10⁻⁵ % | Infinite bandwidth, but FT decays super-exponentially |
-| **Real (Zemax) LSF** | **0.01 – 1.5 %** | Non-Gaussian wings from the rectangular fiber aperture |
-
-The real rectangular-fiber LSF has **millions of times more aliased power** than
-a Gaussian with the same FWHM — not because the Gaussian is "safer" in theory,
-but because the rectangular aperture injects high-frequency content (its Fourier
-transform is a sinc, which decays slowly) that fills in the frequency space above
-Nyquist far more than a smooth Gaussian would.
-
----
-
-## Background: Nyquist Sampling for Spectrographs
-
-### What is Nyquist sampling?
-
-A CCD/detector samples the focal-plane image at discrete pixels of width $p$.
-The **Nyquist–Shannon sampling theorem** says that the detector can faithfully
-represent any spatial structure finer than $2p$ (one full oscillation per 2
-pixels), but all structure finer than that is **aliased**: it folds back into
-lower frequencies and corrupts the measurement.
-
-The **Nyquist frequency** is:
-
-$$f_N = \frac{1}{2p} = 0.5 \text{ cycles per pixel}$$
-
-### Power above Nyquist = aliased power
-
-Every LSF profile has a **Fourier transform** (a power spectrum in spatial
-frequency). Whatever fraction of the total LSF power lies above $f_N$ will be
-mis-represented by the detector:
-
-$$f_{\rm aliased} = \frac{\int_{f_N}^{\infty} |\hat{L}(f)|^2 \, df}{\int_{0}^{\infty} |\hat{L}(f)|^2 \, df}$$
-
-where $\hat{L}(f)$ is the Fourier transform of the LSF.
-
-### The three reference cases
-
-**1. Sinc LSF — 0 % aliased**
-
-A sinc profile in real space, $L(x) = \mathrm{sinc}(\pi x / W)$, has a
-*rectangular* Fourier transform that is exactly zero above some bandwidth
-$B = 1/(2W)$. If $W$ is chosen so that $B \leq f_N$, then by construction
-*no power is above Nyquist*. A band-limited signal is the ideal case.
-
-**2. Gaussian LSF — tiny but non-zero**
-
-A Gaussian profile $L(x) = e^{-x^2/(2\sigma^2)}$ has a Gaussian Fourier
-transform $|\hat{L}(f)|^2 = e^{-4\pi^2\sigma^2 f^2}$ that decays
-super-exponentially but *never reaches zero*. The aliased fraction has an
-exact closed-form expression:
-
-$$f_{\rm aliased}^{\rm Gauss} = \mathrm{erfc}(2\pi\sigma f_N)$$
-
-where $\mathrm{erfc}$ is the complementary error function. For a Gaussian
-with FWHM $\approx 3$ real pixels (typical of these LSFs), $\sigma \approx
-1.35$ px, giving $f_{\rm aliased} \approx 2 \times 10^{-7}$ % — so tiny it
-is effectively zero in any practical sense.
-
-**3. Real spectrograph LSF — hundreds of millions times more**
-
-A real spectrograph LSF inherits structure from the fiber aperture. For a
-**rectangular fiber**, the projected slit image has sharp edges whose Fourier
-transform decays only as $1/f$ (sinc-like), not as $e^{-f^2}$. These edges
-fill in the high-frequency tail far above Nyquist, giving aliased fractions
-of 0.01–1.5 % for the VROOMM v04 design.
-
----
-
-## Data
-
-The `VROOMM_v04_rectangular_fiber/` folder contains:
-- **25 Zemax PSF maps** (`R{order}{field}.txt`) — 80×80 pixel maps at 4×
-  oversampling (1 sim pixel = 0.25 real detector pixel = 3 µm physical)
-- **Companion coordinate file** (`*_XY.txt`) — order, wavelength, and
-  detector position for each field point
-
-The 25 PSFs span 5 diffraction orders (67, 89, 111, 133, 155) over
-**0.39–0.92 µm**, with 5 field positions per order.
-
-> **Testing with different LSFs:** Keep the data folder as-is and simply
-> change the `EXAMPLE_FILE` and `DATA_DIR` variables at the top of
-> `lsf_nyquist.py` to point at any other Zemax export directory with the
-> same file structure.
-
----
-
-## Method
-
-### Step 1 — Rotate the PSF optimally
-
-The rectangular fiber produces a PSF that is *tilted* on the detector (the
-slit is not aligned with pixel rows due to spectrograph anamorphism). Before
-extracting the 1-D LSF, each 2-D PSF is rotated to align the dispersion
-direction with the pixel columns.
-
-The optimal angle is found by maximising the **sum of squared gradients** of
-the column-collapsed profile:
-
-$$\theta^* = \arg\max_\theta \sum_x \left[\frac{d}{dx} \sum_y P_\theta(x, y)\right]^2$$
-
-This quantity is maximised when the LSF has the sharpest possible edges —
-i.e., when the dispersion axis is exactly parallel to the pixel columns.
-
-![PSF rotation and LSF extraction](fig_01_psf_rotation.png)
-
-*Panel (a): raw PSF in its native orientation. Panel (b): optimally rotated
-PSF (by −8° in this example). Panel (c): 1-D LSF extracted by collapsing the
-rotated PSF along the slit axis. The FWHM is measured by half-maximum
-interpolation.*
-
----
-
-### Step 2 — Compare with a Gaussian of the same FWHM
-
-Once the 1-D LSF is extracted, we construct a **Gaussian with the same FWHM**
-to serve as a reference. Both profiles are plotted normalised to unit sum.
-
-![LSF vs matched Gaussian](fig_02_lsf_profiles.png)
-
-*The observed LSF (blue) and its matched Gaussian (red dashed) have identical
-FWHMs. They look nearly identical in real space — the key difference is in
-the wings, which are responsible for the high-frequency power content.*
-
----
-
-### Step 3 — Fourier analysis and Nyquist cut
-
-The LSF and Gaussian are Fourier-transformed and their power spectra compared.
-The **Nyquist frequency** $f_N = 0.5$ cycles/real pixel is marked; any power
-to the right of this line is aliased.
-
-The lower panel shows **"fraction of total power above frequency $f$"** — a
-cumulative diagnostic that answers the question: at any given detector sampling
-rate, what fraction of the signal is unsampled?
-
-![Power spectrum and cumulative aliasing](fig_03_power_spectra.png)
-
-*Top: power spectral density on a log scale. Both profiles are nearly
-identical at low frequencies; the Gaussian falls off faster and the real LSF
-has a visible tail above Nyquist (red-shaded zone).*
-
-*Bottom: reading the curve at $f_N = 0.5$ (green dashed line) gives the
-aliased power fraction. The Gaussian fraction ($\sim 10^{-7}$ %) is so small
-it stays below the plot floor; the sinc would fall to exactly 0 at that line;
-the real LSF sits at ~0.6 % for this particular field point.*
-
----
-
-### Step 4 — Batch over all 25 LSFs
-
-The analysis is repeated for all 25 PSFs, giving aliased fraction and FWHM
-as a function of wavelength for every diffraction order.
-
-![Summary over all LSFs](fig_04_summary.png)
-
-*Top: aliased power fraction (%) on a log scale. Solid circles = real LSF;
-open squares = matched Gaussian (analytic erfc formula). The real LSF is
-consistently 5–9 orders of magnitude above the Gaussian reference.*
-
-*Bottom: LSF FWHM (real pixels) across orders and wavelengths.*
-
----
-
-## Key results
-
-| | Sinc | Gaussian (same FWHM) | Real LSF |
-|--|------|---------------------|----------|
-| Aliased at f > 0.5 cyc/px | 0 % | ~10⁻²² – 10⁻⁵ % | **0.01 – 1.5 %** |
-| Frequency-space property | rect (finite support) | Gaussian (super-exp decay) | sinc-like tails (slow 1/f decay) |
-
-The take-away: **the rectangular fiber aperture introduces sinc-like tails in
-the LSF's Fourier transform that are 5–9 orders of magnitude larger than the
-Gaussian approximation predicts.** The Nyquist aliasing is non-zero and may
-matter for precision line-profile work, despite appearing small on a linear
-scale.
-
----
-
-## Running the code
