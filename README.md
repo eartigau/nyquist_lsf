@@ -297,8 +297,11 @@ Number of pixels  : 80 x 80         ← and this number
 
 Then:
 
-$$\text{sim\_pixel\_um} = \frac{\text{Image Width (mm)}}{\text{n\_pixels}} \times 1000
-= \frac{0.24}{80} \times 1000 = 3.0 \; \mu\text{m}$$
+```
+sim_pixel_um = (Image Width in mm) / (Number of pixels) × 1000
+             = 0.24 / 80 × 1000
+             = 3.0 µm
+```
 
 ---
 
